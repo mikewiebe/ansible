@@ -541,10 +541,11 @@ strategy_loader = PluginLoader(
     required_base_class='StrategyBase',
 )
 
-terminal_loader = PluginLoader(
-    'TerminalModule',
-    'ansible.plugins.terminal',
-    'terminal_plugins',
-    'terminal_plugins'
+cliconf_loader = PluginLoader(
+    'Cliconf',
+    'ansible.plugins.cliconf',
+    'cliconf_plugins',
+    'cliconf_plugins',
+    required_base_class='CliconfBase'
 )
 

@@ -22,10 +22,15 @@ import os
 import pty
 import subprocess
 import sys
+import uuid
+import json
+
+from functools import partial
 
 from ansible.module_utils._text import to_bytes
 from ansible.module_utils.six.moves import cPickle, StringIO
 from ansible.plugins.connection import ConnectionBase
+from ansible.errors import AnsibleError
 
 try:
     from __main__ import display
@@ -40,10 +45,45 @@ class Connection(ConnectionBase):
     transport = 'persistent'
     has_pipelining = False
 
-    def _connect(self):
+    def __getattr__(self, name):
+        try:
+            return self.__dict__[name]
+        except KeyError:
+            if name.startswith('_'):
+                raise AttributeError("'%s' object has no attribute '%s'" % (self.__class__.__name__, name))
+            return partial(self._do_rpc, name)
 
+    def _connect(self):
         self._connected = True
         return self
+
+    def _do_rpc(self, name, *args, **kwargs):
+        reqid = str(uuid.uuid4())
+        req = {'jsonrpc': '2.0', 'method': name, 'id': reqid}
+
+        params = list(args) or kwargs or None
+        if params:
+            req['params'] = params
+
+        display.display('sending %s' % req, log_only=True)
+
+        (rc, out, err) = self.exec_command(json.dumps(req))
+
+        display.display('received %s %s %s' % (rc, out, err), log_only=True)
+
+        try:
+            reply = json.loads(out)
+        except ValueError as exc:
+            raise AnsibleError(err)
+
+        if reply['id'] != reqid:
+            raise AnsiblError('invalid id received')
+
+        if 'error' in reply:
+            msg = reply['error'].get('data') or reply['error']['message']
+            raise AnsibleError(msg)
+
+        return reply['result']
 
     def _do_it(self, action):
 

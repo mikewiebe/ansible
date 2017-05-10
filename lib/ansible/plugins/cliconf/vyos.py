@@ -16,40 +16,36 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
-
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
+import os
 import re
 
-from ansible.plugins.terminal import TerminalBase
+from ansible.plugins.cliconf import CliconfBase
 from ansible.errors import AnsibleConnectionFailure
 
 
-try:
-    from __main__ import display
-except ImportError:
-    from ansible.utils.display import Display
-    display = Display()
+class Cliconf(CliconfBase):
 
-class TerminalModule(TerminalBase):
-
-    terminal_stdout_re = [
-        re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$|%"),
+    cliconf_stdout_re = [
+        re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$"),
+        re.compile(r"\@[\w\-\.]+:\S+?[>#\$] ?$")
     ]
 
-    terminal_stderr_re = [
-        re.compile(r"unknown command"),
-        re.compile(r"syntax error,")
+    cliconf_stderr_re = [
+        re.compile(r"\n\s*Invalid command:"),
+        re.compile(r"\nCommit failed"),
+        re.compile(r"\n\s+Set failed"),
     ]
 
-    def on_open_shell(self):
+    cliconf_length = os.getenv('ANSIBLE_VYOS_TERMINAL_LENGTH', 10000)
+
+    def _on_open_shell(self):
         try:
-            prompt = self._get_prompt()
-            if prompt.strip().endswith('%'):
-                display.vvv('starting cli', self._connection._play_context.remote_addr)
-                self._exec_cli_command('cli')
-            for c in ['set cli timestamp disable', 'set cli screen-length 0', 'set cli screen-width 1024']:
-                self._exec_cli_command(c)
+            for cmd in ['set cliconf length 0', 'set cliconf width 512']:
+                self._exec_cli_command(cmd)
+            self._exec_cli_command('set cliconf length %s' % self.cliconf_length)
         except AnsibleConnectionFailure:
-            raise AnsibleConnectionFailure('unable to set terminal parameters')
+            raise AnsibleConnectionFailure('unable to set cliconf parameters')
+

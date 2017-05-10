@@ -65,6 +65,7 @@ def exec_command(module, command):
         rc = int(recv_data(sf), 10)
         stdout = recv_data(sf)
         stderr = recv_data(sf)
+
     except socket.error:
         exc = get_exception()
         sf.close()
@@ -73,3 +74,52 @@ def exec_command(module, command):
     sf.close()
 
     return (rc, to_native(stdout), to_native(stderr))
+
+class Connection:
+
+    def __init__(self, module):
+        self._module = module
+
+    def __getattr__(self, name):
+        try:
+            return self.__dict__[name]
+        except KeyError:
+            if name.startswith('_'):
+                raise AttributeError("'%s' object has no attribute '%s'" % (self.__class__.__name__, name))
+            return partial(self.__rpc__, name)
+
+    def __rpc__(self, name, *args, **kwargs):
+        reqid = str(uuid.uuid4())
+        req = {'jsonrpc': '2.0', 'method': name, 'id': reqid}
+
+        params = list(args) or kwargs or None
+        if params:
+            req['params'] = params
+
+        if not self._module._socket_path:
+            self._module.fail_json(msg='provider support not available for this host')
+
+        if not os.path.exists(self._module._socket_path):
+            self._module.fail_json(msg='provider socket does not exist, is the provider running?')
+
+        try:
+            data = self._module.jsonify(req)
+            rc, out, err = exec_command(self._module, data)
+
+        except socket.error:
+            exc = get_exception()
+            sf.close()
+            self._module.fail_json(msg='unable to connect to socket', err=str(exc))
+
+        sf.close()
+
+        try:
+            response = self._module.from_json(out)
+        except ValueError as exc:
+            self._module.fail_json(msg=str(exc))
+
+        if response['id'] != reqid:
+            self._module.fail_json(msg='invalid id received')
+
+        return response
+

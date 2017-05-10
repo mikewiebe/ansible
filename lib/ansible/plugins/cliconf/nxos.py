@@ -20,20 +20,22 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 import re
-import json
 
-from ansible.plugins.terminal import TerminalBase
+from itertools import chain
+
+from ansible.plugins.cliconf import CliconfBase, enable_mode
 from ansible.errors import AnsibleConnectionFailure
+from ansible.module_utils.network_common import to_list
 
 
-class TerminalModule(TerminalBase):
+class Cliconf(CliconfBase):
 
-    terminal_stdout_re = [
-        re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$"),
-        re.compile(r"\[\w+\@[\w\-\.]+(?: [^\]])\] ?[>#\$] ?$")
+    cliconf_stdout_re = [
+        re.compile(r'[\r\n]?[a-zA-Z]{1}[a-zA-Z0-9-]*[>|#|%](?:\s*)$'),
+        re.compile(r'[\r\n]?[a-zA-Z]{1}[a-zA-Z0-9-]*\(.+\)#(?:\s*)$')
     ]
 
-    terminal_stderr_re = [
+    cliconf_stderr_re = [
         re.compile(r"% ?Error"),
         re.compile(r"^% \w+", re.M),
         re.compile(r"% ?Bad secret"),
@@ -42,34 +44,25 @@ class TerminalModule(TerminalBase):
         re.compile(r"connection timed out", re.I),
         re.compile(r"[^\r\n]+ not found", re.I),
         re.compile(r"'[^']' +returned error code: ?\d+"),
+        re.compile(r"syntax error"),
+        re.compile(r"unknown command"),
+        re.compile(r"user not present")
     ]
 
-    def authorize(self, passwd=None):
-        if self._get_prompt().endswith('#'):
-            return
-
-        cmd = {'command': 'enable'}
-        if passwd:
-            cmd['prompt'] = r"[\r\n]?password: $"
-            cmd['answer'] = passwd
-
+    def _on_open_shell(self):
         try:
-            self._exec_cli_command(json.dumps(cmd))
-            self._exec_cli_command('terminal pager 0')
+            for cmd in ('cliconf length 0', 'cliconf width 511'):
+                self.send_command(cmd)
         except AnsibleConnectionFailure:
-            raise AnsibleConnectionFailure('unable to elevate privilege to enable mode')
+            raise AnsibleConnectionFailure('unable to set cliconf parameters')
 
-    def on_deauthorize(self):
-        prompt = self._get_prompt()
-        if prompt is None:
-            # if prompt is None most likely the terminal is hung up at a prompt
-            return
+    @enable_mode
+    def get_config(self, source='running'):
+        lookup = {'running': 'running-config', 'startup': 'startup-config'}
+        output = self.send_command('show %s' % lookup[source])
+        return str(output).strip()
 
-        if '(config' in prompt:
-            self._exec_cli_command('end')
-            self._exec_cli_command('disable')
-
-        elif prompt.endswith('#'):
-            self._exec_cli_command('disable')
-
-
+    @enable_mode
+    def edit_config(self, commands):
+        for command in chain(['configure'], to_list(commands), ['end']):
+            self.send_command(command)

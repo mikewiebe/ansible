@@ -22,23 +22,30 @@ __metaclass__ = type
 import re
 import json
 
-from ansible.plugins.terminal import TerminalBase
+from ansible.plugins.cliconf import CliconfBase
 from ansible.errors import AnsibleConnectionFailure
 
+class Cliconf(CliconfBase):
 
-class TerminalModule(TerminalBase):
-
-    terminal_stdout_re = [
+    cliconf_stdout_re = [
         re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$"),
-        re.compile(r"\[\w+\@[\w\-\.]+(?: [^\]])\] ?[>#\$] ?$")
+        re.compile(r"\[\w+\@[\w\-\.]+(?: [^\]])\] ?[>#\$] ?$"),
+        re.compile(r']]>]]>[\r\n]?')
     ]
 
-    terminal_stderr_re = [
-        re.compile(r"Error:"),
+    cliconf_stderr_re = [
+        re.compile(r"% ?Error"),
+        re.compile(r"% ?Bad secret"),
+        re.compile(r"invalid input", re.I),
+        re.compile(r"(?:incomplete|ambiguous) command", re.I),
+        re.compile(r"connection timed out", re.I),
+        re.compile(r"[^\r\n]+ not found", re.I),
+        re.compile(r"'[^']' +returned error code: ?\d+"),
     ]
 
-    def on_open_shell(self):
+    def _on_open_shell(self):
         try:
-            self._exec_cli_command('environment no more')
+            for cmd in ['cliconf length 0', 'cliconf width 512', 'cliconf exec prompt no-timestamp']:
+                self._exec_cli_command(cmd)
         except AnsibleConnectionFailure:
-            raise AnsibleConnectionFailure('unable to set terminal parameters')
+            raise AnsibleConnectionFailure('unable to set cliconf parameters')

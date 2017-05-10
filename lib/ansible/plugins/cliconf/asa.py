@@ -20,19 +20,20 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 import re
+import json
 
-from ansible.plugins.terminal import TerminalBase
+from ansible.plugins.cliconf import CliconfBase
 from ansible.errors import AnsibleConnectionFailure
 
 
-class TerminalModule(TerminalBase):
+class Cliconf(CliconfBase):
 
-    terminal_stdout_re = [
-        re.compile(r'[\r\n]?[a-zA-Z]{1}[a-zA-Z0-9-]*[>|#|%](?:\s*)$'),
-        re.compile(r'[\r\n]?[a-zA-Z]{1}[a-zA-Z0-9-]*\(.+\)#(?:\s*)$')
+    cliconf_stdout_re = [
+        re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$"),
+        re.compile(r"\[\w+\@[\w\-\.]+(?: [^\]])\] ?[>#\$] ?$")
     ]
 
-    terminal_stderr_re = [
+    cliconf_stderr_re = [
         re.compile(r"% ?Error"),
         re.compile(r"^% \w+", re.M),
         re.compile(r"% ?Bad secret"),
@@ -41,15 +42,34 @@ class TerminalModule(TerminalBase):
         re.compile(r"connection timed out", re.I),
         re.compile(r"[^\r\n]+ not found", re.I),
         re.compile(r"'[^']' +returned error code: ?\d+"),
-        re.compile(r"syntax error"),
-        re.compile(r"unknown command"),
-        re.compile(r"user not present")
     ]
 
-    def on_open_shell(self):
+    def authorize(self, passwd=None):
+        if self._get_prompt().endswith('#'):
+            return
+
+        cmd = {'command': 'enable'}
+        if passwd:
+            cmd['prompt'] = r"[\r\n]?password: $"
+            cmd['answer'] = passwd
+
         try:
-            for cmd in ['terminal length 0', 'terminal width 511']:
-                self._exec_cli_command(cmd)
+            self._exec_cli_command(json.dumps(cmd))
+            self._exec_cli_command('cliconf pager 0')
         except AnsibleConnectionFailure:
-            raise AnsibleConnectionFailure('unable to set terminal parameters')
+            raise AnsibleConnectionFailure('unable to elevate privilege to enable mode')
+
+    def _on_deauthorize(self):
+        prompt = self._get_prompt()
+        if prompt is None:
+            # if prompt is None most likely the cliconf is hung up at a prompt
+            return
+
+        if '(config' in prompt:
+            self._exec_cli_command('end')
+            self._exec_cli_command('disable')
+
+        elif prompt.endswith('#'):
+            self._exec_cli_command('disable')
+
 

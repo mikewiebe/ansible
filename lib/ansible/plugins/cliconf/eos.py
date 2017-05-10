@@ -3,8 +3,6 @@
 #
 # This file is part of Ansible
 #
-# Copyright (c) 2017 Dell Inc.
-#
 # Ansible is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
@@ -24,35 +22,38 @@ __metaclass__ = type
 import re
 import json
 
-from ansible.plugins.terminal import TerminalBase
+from ansible.plugins.cliconf import CliconfBase
 from ansible.errors import AnsibleConnectionFailure
 
 
-class TerminalModule(TerminalBase):
+class Cliconf(CliconfBase):
 
-    terminal_stdout_re = [
-        re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:#) ?$"),
+    cliconf_stdout_re = [
+        re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$"),
         re.compile(r"\[\w+\@[\w\-\.]+(?: [^\]])\] ?[>#\$] ?$")
     ]
 
-    terminal_stderr_re = [
+    cliconf_stderr_re = [
         re.compile(r"% ?Error"),
+        re.compile(r"^% \w+", re.M),
+        re.compile(r"% User not present"),
         re.compile(r"% ?Bad secret"),
-        re.compile(r"Syntax error:"),
         re.compile(r"invalid input", re.I),
         re.compile(r"(?:incomplete|ambiguous) command", re.I),
         re.compile(r"connection timed out", re.I),
         re.compile(r"[^\r\n]+ not found", re.I),
         re.compile(r"'[^']' +returned error code: ?\d+"),
+        re.compile(r"[^\r\n]\/bin\/(?:ba)?sh")
     ]
 
-    def on_open_shell(self):
+    def _on_open_shell(self):
         try:
-            self._exec_cli_command('terminal length 0')
+            for cmd in ['cliconf length 0', 'cliconf width 512']:
+                self._exec_cli_command(cmd)
         except AnsibleConnectionFailure:
-            raise AnsibleConnectionFailure('unable to set terminal parameters')
+            raise AnsibleConnectionFailure('unable to set cliconf parameters')
 
-    def on_authorize(self, passwd=None):
+    def _on_authorize(self, passwd=None):
         if self._get_prompt().endswith('#'):
             return
 
@@ -66,15 +67,17 @@ class TerminalModule(TerminalBase):
         except AnsibleConnectionFailure:
             raise AnsibleConnectionFailure('unable to elevate privilege to enable mode')
 
-    def on_deauthorize(self):
+    def _on_deauthorize(self):
         prompt = self._get_prompt()
         if prompt is None:
-            # if prompt is None most likely the terminal is hung up at a prompt
+            # if prompt is None most likely the cliconf is hung up at a prompt
             return
 
-        if prompt.strip().endswith(')#'):
+        if '(config' in prompt:
             self._exec_cli_command('end')
             self._exec_cli_command('disable')
 
         elif prompt.endswith('#'):
             self._exec_cli_command('disable')
+
+

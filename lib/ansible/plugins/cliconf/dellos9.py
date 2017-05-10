@@ -1,4 +1,7 @@
-#  2016 Red Hat Inc.
+#
+# (c) 2016 Red Hat Inc.
+#
+# Copyright (c) 2017 Dell Inc.
 #
 # This file is part of Ansible
 #
@@ -21,18 +24,18 @@ __metaclass__ = type
 import re
 import json
 
-from ansible.plugins.terminal import TerminalBase
+from ansible.plugins.cliconf import CliconfBase
 from ansible.errors import AnsibleConnectionFailure
 
 
-class TerminalModule(TerminalBase):
+class Cliconf(CliconfBase):
 
-    terminal_stdout_re = [
+    cliconf_stdout_re = [
         re.compile(r"[\r\n]?[\w+\-\.:\/\[\]]+(?:\([^\)]+\)){,3}(?:>|#) ?$"),
         re.compile(r"\[\w+\@[\w\-\.]+(?: [^\]])\] ?[>#\$] ?$")
     ]
 
-    terminal_stderr_re = [
+    cliconf_stderr_re = [
         re.compile(r"% ?Error: (?:(?!\bdoes not exist\b)(?!\balready exists\b)(?!\bHost not found\b)(?!\bnot active\b).)*$"),
         re.compile(r"% ?Bad secret"),
         re.compile(r"invalid input", re.I),
@@ -41,28 +44,30 @@ class TerminalModule(TerminalBase):
         re.compile(r"'[^']' +returned error code: ?\d+"),
     ]
 
-    def on_authorize(self, passwd=None):
+    def _on_open_shell(self):
+        try:
+            self._exec_cli_command('cliconf length 0')
+        except AnsibleConnectionFailure:
+            raise AnsibleConnectionFailure('unable to set cliconf parameters')
+
+    def _on_authorize(self, passwd=None):
         if self._get_prompt().endswith('#'):
             return
 
         cmd = {'command': 'enable'}
         if passwd:
-            cmd['prompt'] = r"[\r\n]?password:$"
+            cmd['prompt'] = r"[\r\n]?password: $"
             cmd['answer'] = passwd
+
         try:
             self._exec_cli_command(json.dumps(cmd))
         except AnsibleConnectionFailure:
             raise AnsibleConnectionFailure('unable to elevate privilege to enable mode')
-        # in dellos6 the terminal settings are accepted after the privilege mode
-        try:
-            self._exec_cli_command('terminal length 0')
-        except AnsibleConnectionFailure:
-            raise AnsibleConnectionFailure('unable to set terminal parameters')
 
-    def on_deauthorize(self):
+    def _on_deauthorize(self):
         prompt = self._get_prompt()
         if prompt is None:
-            # if prompt is None most likely the terminal is hung up at a prompt
+            # if prompt is None most likely the cliconf is hung up at a prompt
             return
 
         if prompt.strip().endswith(')#'):
