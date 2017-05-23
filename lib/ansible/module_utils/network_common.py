@@ -25,7 +25,9 @@
 # LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 # USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from ansible.module_utils.six import iteritems
+from itertools import chain
+
+from ansible.module_utils.six import iteritems, iterkeys
 from ansible.module_utils.basic import AnsibleFallbackNotFound
 
 def to_list(val):
@@ -36,7 +38,12 @@ def to_list(val):
     else:
         return list()
 
-class ComplexDict(object):
+def sort(val):
+    if isinstance(val, list):
+        return sorted(val)
+    return val
+
+class Entity(object):
     """Transforms a dict to with an argument spec
 
     This class will take a dict and apply an Ansible argument spec to the
@@ -50,7 +57,7 @@ class ComplexDict(object):
             display=dict(default='text', choices=['text', 'json']),
             validate=dict(type='bool')
         )
-        transform = ComplexDict(argument_spec, module)
+        transform = Entity(module, argument_spec)
         value = dict(command='foo')
         result = transform(value)
         print result
@@ -67,29 +74,40 @@ class ComplexDict(object):
 
     """
 
-    def __init__(self, attrs, module):
-        self._attributes = attrs
+    def __init__(self, module, attrs=None, args=[], keys=None, from_argspec=False):
+        self._attributes = attrs or {}
         self._module = module
+
+        for arg in args:
+            self._attributes[arg] = dict()
+            if from_argspec:
+                self._attributes[arg]['read_from'] = arg
+            if keys and arg in keys:
+                self._attributes[arg]['key'] = True
+
         self.attr_names = frozenset(self._attributes.keys())
 
-        self._has_key = False
+        _has_key = False
+
         for name, attr in iteritems(self._attributes):
             if attr.get('read_from'):
-                spec = self._module.argument_spec.get(attr['read_from'])
-                if not spec:
+                if attr['read_from'] not in self._module.argument_spec:
                     raise ValueError('argument_spec %s does not exist' %  attr['read_from'])
+                spec = self._module.argument_spec.get(attr['read_from'])
                 for key, value in iteritems(spec):
                     if key not in attr:
                         attr[key] = value
 
             if attr.get('key'):
-                if self._has_key:
+                if _has_key:
                     raise ValueError('only one key value can be specified')
-                self_has_key = True
+                _has_key = True
                 attr['required'] = True
 
+    def serialize(self):
+        return self._attributes
 
-    def _dict(self, value):
+    def to_dict(self, value):
         obj = {}
         for name, attr in iteritems(self._attributes):
             if attr.get('key'):
@@ -98,16 +116,17 @@ class ComplexDict(object):
                 obj[name] = attr.get('default')
         return obj
 
-    def __call__(self, value):
+    def __call__(self, value, strict=True):
         if not isinstance(value, dict):
-            value = self._dict(value)
+            value = self.to_dict(value)
 
-        unknown = set(value).difference(self.attr_names)
-        if unknown:
-            raise ValueError('invalid keys: %s' % ','.join(unknown))
+        if strict:
+            unknown = set(value).difference(self.attr_names)
+            if unknown:
+                self._module.fail_json(msg='invalid keys: %s' % ','.join(unknown))
 
         for name, attr in iteritems(self._attributes):
-            if not value.get(name):
+            if value.get(name) is None:
                 value[name] = attr.get('default')
 
             if attr.get('fallback') and not value.get(name):
@@ -138,14 +157,116 @@ class ComplexDict(object):
                 value_type = attr.get('type', 'str')
                 type_checker = self._module._CHECK_ARGUMENT_TYPES_DISPATCHER[value_type]
                 type_checker(value[name])
+            else:
+                value[name] = self._module.params[name]
 
         return value
 
-class ComplexList(ComplexDict):
-    """Extends ```ComplexDict``` to handle a  list of dicts """
 
-    def __call__(self, values):
-        if not isinstance(values, (list, tuple)):
-            raise TypeError('value must be an ordered iterable')
-        return [(super(ComplexList, self).__call__(v)) for v in values]
+class EntityCollection(Entity):
+    """Extends ```Entity``` to handle a list of dicts """
 
+    def __call__(self, iterable, strict=True):
+        if iterable is None:
+            iterable = [super(EntityCollection, self).__call__(self._module.params, strict)]
+
+        if not isinstance(iterable, (list, tuple)):
+            raise TypeError('value must be an iterable')
+
+        return [(super(EntityCollection, self).__call__(i, strict)) for i in iterable]
+
+
+ComplexDict = Entity
+ComplexList = EntityCollection
+
+def dict_diff(base, comparable):
+    """ Generate a dict object of differences
+
+    This function will compare two dict objects and return the difference
+    between them as a dict object.  For scalar values, the key will reflect
+    the updated value.  If the key does not exist in `comparable`, then then no
+    key will be returned.  For lists, the value in comparable will wholly replace
+    the value in base for the key.  For dicts, the returned value will only
+    return keys that are different.
+
+    :param base: dict object to base the diff on
+    :param comparable: dict object to compare against base
+
+    :returns: new dict object with differences
+    """
+    assert isinstance(base, dict), "`base` must be of type <dict>"
+    assert isinstance(comparable, dict), "`comparable` must be of type <dict>"
+
+    updates = dict()
+
+    for key, value in iteritems(base):
+        if isinstance(value, dict):
+            item = comparable.get(key)
+            if item is not None:
+                updates[key] = diff(value, comparable[key])
+        else:
+            comparable_value = comparable.get(key)
+            if comparable_value is not None:
+                if sort(base[key]) != sort(comparable_value):
+                    updates[key] = comparable_value
+
+
+    for key in set(iterkeys(comparable)).difference(iterkeys(base)):
+        updates[key] = comparable.get(key)
+
+    return updates
+
+def dict_combine(base, other):
+    """ Return a new dict object that combines base and other
+
+    This will create a new dict object that is a combination of the key/value
+    pairs from base and other.  When both keys exist, the value will be
+    selected from other.  If the value is a list object, the two lists will
+    be combined and duplicate entries removed.
+
+    :param base: dict object to serve as base
+    :param other: dict object to combine with base
+
+    :returns: new cobmined dict object
+    """
+    assert isinstance(base, dict), "`base` must be of type <dict>"
+    assert isinstance(other, dict), "`other` must be of type <dict>"
+
+    combined = dict()
+
+    for key, value in iteritems(base):
+        if isinstance(value, dict):
+            if key in other:
+                item = other.get(key)
+                if item is not None:
+                    combined[key] = combine(value, other[key])
+                else:
+                    combined[key] = item
+            else:
+                combined[key] = value
+        elif isinstance(value, list):
+            if key in other:
+                item = other.get(key)
+                if item is not None:
+                    combined[key] = list(set(chain(value, item)))
+                else:
+                    combined[key] = item
+            else:
+                combined[key] = value
+        else:
+            if key in other:
+                other_value = other.get(key)
+                if other_value is not None:
+                    if sort(base[key]) != sort(other_value):
+                        combined[key] = other_value
+                    else:
+                        combined[key] = value
+                else:
+                    combined[key] = other_value
+            else:
+                combined[key] = value
+
+    for key in set(iterkeys(other)).difference(iterkeys(base)):
+        combined[key] = other.get(key)
+
+    return combined
