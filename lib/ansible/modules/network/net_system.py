@@ -24,7 +24,7 @@ ANSIBLE_METADATA = {'metadata_version': '1.0',
                     'supported_by': 'core'}
 
 
-DOCUMENTATION = '''
+DOCUMENTATION = """
 ---
 module: net_system
 version_added: 2.4
@@ -107,3 +107,5 @@ commands:
     - hostname ios01
     - ip domain name test.example.com
 """
+
+ANSIBLE_ACTION_HANDLER = 'network_base'
