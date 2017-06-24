@@ -35,7 +35,9 @@ import re
 import ast
 import copy
 import operator
-import collections
+
+from collections import Mapping, Iterable
+from collections import namedtuple
 
 import q
 
@@ -63,6 +65,7 @@ ATTR_PROPERTIES = frozenset(
         'items',
         'multiple',
         'default_value',
+        'when',
 
         # set attributes
         'context',
@@ -85,7 +88,7 @@ ATTR_DEFAULTS = {
 }
 
 
-_Attr = collections.namedtuple('Attr', ATTR_PROPERTIES)
+_Attr = namedtuple('Attr', ATTR_PROPERTIES)
 
 def ternary(value, true_val, false_val):
     '''  value ? true_val : false_val '''
@@ -110,8 +113,9 @@ class Loader(object):
         self.platform = platform
         self.attributes = {}
         self.commands = set()
+
         self.env = Environment()
-        self.env.filters['ternary'] = ternary
+        self.add_filters({'ternary': ternary})
 
         self._load_spec(spec)
 
@@ -124,11 +128,11 @@ class Loader(object):
         return obj
 
     def _make_attr(self, data):
-        assert isinstance(data, dict)
+        assert isinstance(data, Mapping)
         kwargs = {}
         for item in ATTR_PROPERTIES:
             value = data.get(item)
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 val = {}
                 for name, attrs in iteritems(value):
                     val[name] = self._make_attr(attrs)
@@ -139,7 +143,7 @@ class Loader(object):
         return _Attr(**kwargs)
 
     def _load_spec(self, spec, defaults=None):
-        assert isinstance(spec, dict)
+        assert isinstance(spec, Mapping)
 
         if '_defaults' in spec and not defaults:
             defaults = self._platform_spec(spec['_defaults'])
@@ -160,11 +164,22 @@ class Loader(object):
                 self.commands.add((attr.command, attr.format))
 
     def _platform_spec(self, entry):
-        assert isinstance(entry, dict)
+        assert isinstance(entry, Mapping)
         platform = entry.get(self.platform, {})
         return dict_combine(entry, platform)
 
-    def template(self, tmpl, kind='str', variables={}):
+    def add_filters(self, filters):
+        assert isinstance(filters, Mapping), 'argument must be of type <dict>'
+        self.env.filters.update(filters)
+
+    def template(self, tmpl, kind='str', variables={}, when=None):
+
+        if when:
+            conditional = "{%% if %s %%}True{%% else %%}False{%% endif %%}" % when
+            value = self.env.from_string(conditional).render(variables)
+            if not ast.literal_eval(value):
+                return None
+
         value = self.env.from_string(tmpl).render(variables)
 
         try:
@@ -188,18 +203,24 @@ class Loader(object):
             return attr.set_value
 
     def _populate_dict(self, attr, variables):
-        assert isinstance(variables, dict), 'variables is wrong type, expected dict, got %s' % type(variables)
+        assert isinstance(variables, Mapping), 'variables is wrong type, expected dict, got %s' % type(variables)
 
         obj = {}
 
+        when = attr.when
+
         for name, attr in iteritems(attr.get_value):
             try:
-                value = self.template(attr.get_value, (attr.kind or 'str'), variables)
+                value = self.template(attr.get_value, (attr.kind or 'str'), variables, when=when)
             except UndefinedError:
                 value = None
-            obj[name] = value
 
-        return obj
+            if value:
+                obj[name] = value
+
+        if obj:
+            return obj
+
 
     def send_to_device(self, obj=None, operation='merge'):
         assert operation in ('delete', 'merge'), 'invalid operation specified'
@@ -210,7 +231,7 @@ class Loader(object):
         if operation == 'delete' and not obj:
             obj = self.load_from_device()
 
-        assert isinstance(obj, dict)
+        assert isinstance(obj, Mapping)
 
         for key, value in iteritems(obj):
             variables = copy.deepcopy(obj)
@@ -225,7 +246,7 @@ class Loader(object):
                 continue
 
             for item in to_list(value):
-                if isinstance(item, tuple):
+                if isinstance(item, Iterable):
                     item, op = item
                     if operation != op:
                         operation = op
@@ -235,7 +256,7 @@ class Loader(object):
                     variables['item'] = item
                     setter = self._get_setter(attr, operation)
 
-                if isinstance(item, dict):
+                if isinstance(item, Mapping):
                     variables.update(item)
 
                 # attr is readonly
@@ -249,7 +270,7 @@ class Loader(object):
                     for entry in to_list(attr.context):
                         context.append(self.template(entry, variables=variables))
 
-                if isinstance(setter, dict):
+                if isinstance(setter, Mapping):
                     updates = to_list(context)
 
                     for item_key, item_value in iteritems(setter):
@@ -321,7 +342,7 @@ class Loader(object):
                         variables['items'] = list(match.groups())
                         variables.update(match.groupdict())
 
-            if attr.kind == 'list' and isinstance(attr.get_value, dict):
+            if attr.kind == 'list' and isinstance(attr.get_value, Mapping):
                 if attr.format != 'json':
                     # FIXME: this will cause re.findall() to be run twice in some
                     # cases due to above if attr.items ...
@@ -340,13 +361,16 @@ class Loader(object):
                             for key_name, index in iteritems(regex.groupindex):
                                 item_vars[key_name] = item[index - 1]
 
-                    values.append(self._populate_dict(attr, item_vars))
+                    templated = self._populate_dict(attr, item_vars)
+                    if templated:
+                        values.append(templated)
+
 
                 value = values
 
             else:
                 try:
-                    value = self.template(attr.get_value, attr.kind, variables)
+                    value = self.template(attr.get_value, attr.kind, variables, when=attr.when)
                 except UndefinedError:
                     value = None
 
@@ -373,14 +397,14 @@ class ConfigLoader(Loader):
         if operation == 'delete' and not obj:
             obj = current
 
-        assert isinstance(obj, dict), 'argument must be of type <dict>'
+        assert isinstance(obj, Mapping), 'argument must be of type <dict>'
 
         diff = dict_diff(current, obj)
         loadable = {}
 
         for key, value in iteritems(diff):
 
-            if isinstance(value, list):
+            if isinstance(value, Iterable):
                 attr = self.attributes[key]
 
                 haves = current.get(key, [])
@@ -391,14 +415,14 @@ class ConfigLoader(Loader):
                 if wants:
                     if purge:
                         for item in haves:
-                            if isinstance(item, dict):
+                            if isinstance(item, Mapping):
                                 if not self._match_dict_item(item, wants, attr):
                                     values.append((item, 'delete'))
                             elif item not in wants:
                                 values.append((item, 'delete'))
 
                     for item in wants:
-                        if isinstance(item, dict):
+                        if isinstance(item, Mapping):
                             if not self._match_dict_item(item, haves, attr, exact_match=True):
                                 values.append((item, 'merge'))
                         elif item not in haves:
