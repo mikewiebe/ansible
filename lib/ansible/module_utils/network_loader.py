@@ -48,7 +48,7 @@ try:
 except ImportError:
     HAS_JINJA2 = False
 
-from ansible.module_utils.network_common import dict_diff, dict_combine
+from ansible.module_utils.network_common import dict_diff, dict_merge
 from ansible.module_utils.network_common import to_list
 from ansible.module_utils.six import iteritems
 
@@ -147,8 +147,8 @@ class Loader(object):
 
         if '_defaults' in spec and not defaults:
             defaults = self._platform_spec(spec['_defaults'])
-            if 'default_format' in defaults:
-                ATTR_DEFAULTS['format'] = defaults['default_format']
+            if 'get_format' in defaults:
+                ATTR_DEFAULTS['format'] = defaults['get_format']
 
 
         for key, values in iteritems(spec):
@@ -156,7 +156,7 @@ class Loader(object):
                 data = self._platform_spec(values)
 
                 if defaults:
-                    data = dict_combine(defaults, data)
+                    data = dict_merge(defaults, data)
 
                 attr = self._make_attr(data)
 
@@ -166,7 +166,7 @@ class Loader(object):
     def _platform_spec(self, entry):
         assert isinstance(entry, Mapping)
         platform = entry.get(self.platform, {})
-        return dict_combine(entry, platform)
+        return dict_merge(entry, platform)
 
     def add_filters(self, filters):
         assert isinstance(filters, Mapping), 'argument must be of type <dict>'
